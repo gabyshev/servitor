@@ -16,18 +16,33 @@ import (
 	api "gopkg.in/telegram-bot-api.v4"
 )
 
-const (
-	EnvPrefix = "servitor"
-)
+var Conf Config
 
 type AuthHandler struct {
 	bot    *api.BotAPI
 	client *datastore.Client
 }
 
+type Config struct {
+	Entity  string
+	Token   string
+	Host    string
+	Project string
+}
+
+func initConfig() {
+	viper.SetEnvPrefix("servitor")
+	viper.AutomaticEnv()
+	Conf = Config{
+		Entity:  viper.GetString("entity"),
+		Token:   viper.GetString("token"),
+		Host:    viper.GetString("host"),
+		Project: viper.GetString("project"),
+	}
+}
+
 func (h *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
-	entity := viper.GetString("entity")
 	//code := r.URL.Query().Get("code")
 	state := r.URL.Query().Get("state")
 
@@ -36,7 +51,7 @@ func (h *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Panic(err)
 	}
 
-	key := datastore.IDKey(entity, id, nil)
+	key := datastore.IDKey(Conf.Entity, id, nil)
 	log.Printf("search key is: %q", key)
 	var chat types.Chat
 
@@ -54,9 +69,8 @@ func (h *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func getChat(c *datastore.Client, u api.Update) *types.Chat {
-	entity := viper.GetString("entity")
 	ctx := context.Background()
-	query := datastore.NewQuery(entity).Filter("ID =", u.Message.Chat.ID)
+	query := datastore.NewQuery(Conf.Entity).Filter("ID =", u.Message.Chat.ID)
 	it := c.Run(ctx, query)
 	var chat types.Chat
 	_, _ = it.Next(&chat)
@@ -67,9 +81,7 @@ func getChat(c *datastore.Client, u api.Update) *types.Chat {
 }
 
 func initBot(debug bool) *api.BotAPI {
-	token := viper.GetString("token")
-	host := viper.GetString("host")
-	bot, err := api.NewBotAPI(token)
+	bot, err := api.NewBotAPI(Conf.Token)
 	if err != nil {
 		log.Panic(err)
 	}
@@ -77,7 +89,7 @@ func initBot(debug bool) *api.BotAPI {
 	bot.Debug = debug
 
 	log.Printf("Authorized on acc %s", bot.Self.UserName)
-	_, err = bot.SetWebhook(api.NewWebhook(host + bot.Token))
+	_, err = bot.SetWebhook(api.NewWebhook(Conf.Host + bot.Token))
 
 	if err != nil {
 		log.Fatal(err)
@@ -86,7 +98,6 @@ func initBot(debug bool) *api.BotAPI {
 }
 
 func processUpdate(c *datastore.Client, u api.Update, bot *api.BotAPI) {
-	entity := viper.GetString("entity")
 	chat := getChat(c, u)
 	if chat == nil {
 		chat = &types.Chat{
@@ -105,17 +116,13 @@ func processUpdate(c *datastore.Client, u api.Update, bot *api.BotAPI) {
 		case "start":
 			if chat.IsAuthorized {
 				//smth else
-				log.Println("chat is already authorized")
 			}
-			log.Printf("chat is new")
 			ctx := context.Background()
-			key, err := c.Put(ctx, datastore.IncompleteKey(entity, nil), chat)
+			key, err := c.Put(ctx, datastore.IncompleteKey(Conf.Entity, nil), chat)
 			if err != nil {
 				log.Panic(err)
 			}
-			log.Printf("key is : %q", key)
 			stateToken := strconv.FormatInt(key.ID, 10)
-			log.Printf("state is : %q", stateToken)
 			authURL := auth.GetAuthUrl(stateToken)
 			msg.Text = authURL
 		default:
@@ -126,13 +133,10 @@ func processUpdate(c *datastore.Client, u api.Update, bot *api.BotAPI) {
 }
 
 func main() {
-	viper.SetEnvPrefix(EnvPrefix)
-	viper.AutomaticEnv()
-	project := viper.GetString("project")
-
+	initConfig()
 	ctx := context.Background()
 	bot := initBot(true)
-	client, err := datastore.NewClient(ctx, project)
+	client, err := datastore.NewClient(ctx, Conf.Project)
 	if err != nil {
 		log.Panic(err)
 	}
