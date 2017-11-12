@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/datastore"
+	"github.com/google/uuid"
 	"github.com/spf13/viper"
 	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
@@ -20,27 +21,14 @@ import (
 )
 
 var (
-	Conf       Config
+	Conf       types.Config
 	AuthConfig *oauth2.Config
 )
-
-type AuthHandler struct {
-	bot    *api.BotAPI
-	client *datastore.Client
-}
-
-type Config struct {
-	Entity       string
-	Token        string
-	Host         string
-	Project      string
-	ClientSecret string
-}
 
 func initConfig() {
 	viper.SetEnvPrefix("servitor")
 	viper.AutomaticEnv()
-	Conf = Config{
+	Conf = types.Config{
 		Entity:       viper.GetString("entity"),
 		Token:        viper.GetString("token"),
 		Host:         viper.GetString("host"),
@@ -54,44 +42,33 @@ func Init() {
 	AuthConfig = getOauth2Config()
 }
 
-func (h *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+//get list of events
+func getListOfEvents(c *types.Chat) {
 	ctx := context.Background()
-	code := r.URL.Query().Get("code")
-	state := r.URL.Query().Get("state")
+	client := AuthConfig.Client(ctx, c.Token)
 
-	id, err := strconv.ParseInt(state, 10, 64)
+	srv, err := calendar.New(client)
 	if err != nil {
-		log.Panic(err)
+		log.Fatalf("Unable to retrieve calendar Client %v", err)
 	}
 
-	key := datastore.IDKey(Conf.Entity, id, nil)
-	var chat types.Chat
+	uuid := uuid.New()
+	chn := calendar.Channel{
+		Id:      uuid.String(),
+		Type:    "web_hook",
+		Address: Conf.Host + "notification",
+	}
 
-	_, err = h.client.RunInTransaction(ctx, func(tx *datastore.Transaction) error {
-		err = h.client.Get(ctx, key, &chat)
-		if err != nil {
-			return err
-		}
+	events := srv.Events.
+		Watch("primary", &chn)
 
-		token, err := AuthConfig.Exchange(oauth2.NoContext, code)
-		if err != nil {
-			return err
-		}
-
-		chat.Token = token
-		chat.IsAuthorized = true
-		chat.Updated = time.Now()
-
-		_, err = tx.Put(key, &chat)
-		return err
-	})
+	channel, err := events.Do()
 
 	if err != nil {
 		log.Panic(err)
 	}
 
-	msg := api.NewMessage(chat.ID, "you are successfully authorized")
-	h.bot.Send(msg)
+	log.Printf("%+v\n", channel)
 }
 
 func getChat(c *datastore.Client, u api.Update) *types.Chat {
@@ -141,6 +118,7 @@ func processUpdate(c *datastore.Client, u api.Update, bot *api.BotAPI) {
 		switch u.Message.Command() {
 		case "start":
 			if chat.IsAuthorized {
+				getListOfEvents(chat)
 				msg.Text = "you're already authorized"
 			} else {
 				ctx := context.Background()
@@ -183,7 +161,8 @@ func main() {
 	updates := bot.ListenForWebhook("/" + bot.Token)
 
 	//http.Handle("/", http.FileServer(http.Dir("./static")))
-	http.Handle("/auth/google", &AuthHandler{bot: bot, client: client})
+	http.Handle("/auth/google", &types.AuthHandler{Bot: bot, Client: client, Conf: &Conf, AuthConfig: AuthConfig})
+	http.Handle("/notification", &types.NotificationHandler{Bot: bot, Client: client})
 	go http.ListenAndServe(":5000", nil)
 
 	for update := range updates {
