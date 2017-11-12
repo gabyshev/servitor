@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io/ioutil"
 	"log"
 	"net/http"
 	"strconv"
@@ -9,14 +10,19 @@ import (
 	"cloud.google.com/go/datastore"
 	"github.com/spf13/viper"
 	"golang.org/x/net/context"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+	"google.golang.org/api/calendar/v3"
 
-	"github.com/gabyshev/servitor/auth"
 	"github.com/gabyshev/servitor/types"
 
 	api "gopkg.in/telegram-bot-api.v4"
 )
 
-var Conf Config
+var (
+	Conf       Config
+	AuthConfig *oauth2.Config
+)
 
 type AuthHandler struct {
 	bot    *api.BotAPI
@@ -24,26 +30,33 @@ type AuthHandler struct {
 }
 
 type Config struct {
-	Entity  string
-	Token   string
-	Host    string
-	Project string
+	Entity       string
+	Token        string
+	Host         string
+	Project      string
+	ClientSecret string
 }
 
 func initConfig() {
 	viper.SetEnvPrefix("servitor")
 	viper.AutomaticEnv()
 	Conf = Config{
-		Entity:  viper.GetString("entity"),
-		Token:   viper.GetString("token"),
-		Host:    viper.GetString("host"),
-		Project: viper.GetString("project"),
+		Entity:       viper.GetString("entity"),
+		Token:        viper.GetString("token"),
+		Host:         viper.GetString("host"),
+		Project:      viper.GetString("project"),
+		ClientSecret: viper.GetString("client_secret"),
 	}
+}
+
+func Init() {
+	initConfig()
+	AuthConfig = getOauth2Config()
 }
 
 func (h *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
-	//code := r.URL.Query().Get("code")
+	code := r.URL.Query().Get("code")
 	state := r.URL.Query().Get("state")
 
 	id, err := strconv.ParseInt(state, 10, 64)
@@ -52,18 +65,31 @@ func (h *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	key := datastore.IDKey(Conf.Entity, id, nil)
-	log.Printf("search key is: %q", key)
 	var chat types.Chat
 
-	err = h.client.Get(ctx, key, &chat)
+	_, err = h.client.RunInTransaction(ctx, func(tx *datastore.Transaction) error {
+		err = h.client.Get(ctx, key, &chat)
+		if err != nil {
+			return err
+		}
+
+		token, err := AuthConfig.Exchange(oauth2.NoContext, code)
+		if err != nil {
+			return err
+		}
+
+		chat.Token = token
+		chat.IsAuthorized = true
+		chat.Updated = time.Now()
+
+		_, err = tx.Put(key, &chat)
+		return err
+	})
+
 	if err != nil {
 		log.Panic(err)
 	}
 
-	chat.IsAuthorized = true
-	chat.Updated = time.Now()
-
-	//TODO: exchange code for token ans save it
 	msg := api.NewMessage(chat.ID, "you are successfully authorized")
 	h.bot.Send(msg)
 }
@@ -115,16 +141,17 @@ func processUpdate(c *datastore.Client, u api.Update, bot *api.BotAPI) {
 		switch u.Message.Command() {
 		case "start":
 			if chat.IsAuthorized {
-				//smth else
+				msg.Text = "you're already authorized"
+			} else {
+				ctx := context.Background()
+				key, err := c.Put(ctx, datastore.IncompleteKey(Conf.Entity, nil), chat)
+				if err != nil {
+					log.Panic(err)
+				}
+				stateToken := strconv.FormatInt(key.ID, 10)
+				authURL := AuthConfig.AuthCodeURL(stateToken, oauth2.AccessTypeOffline)
+				msg.Text = authURL
 			}
-			ctx := context.Background()
-			key, err := c.Put(ctx, datastore.IncompleteKey(Conf.Entity, nil), chat)
-			if err != nil {
-				log.Panic(err)
-			}
-			stateToken := strconv.FormatInt(key.ID, 10)
-			authURL := auth.GetAuthUrl(stateToken)
-			msg.Text = authURL
 		default:
 			msg.Text = "Sorry, unknown command"
 		}
@@ -132,8 +159,20 @@ func processUpdate(c *datastore.Client, u api.Update, bot *api.BotAPI) {
 	}
 }
 
+func getOauth2Config() *oauth2.Config {
+	b, err := ioutil.ReadFile(Conf.ClientSecret)
+	if err != nil {
+		log.Fatalf("Unable to read client secret file: %v", err)
+	}
+	config, err := google.ConfigFromJSON(b, calendar.CalendarScope)
+	if err != nil {
+		log.Fatalf("Unable to create config form client secret file: %v", err)
+	}
+	return config
+}
+
 func main() {
-	initConfig()
+	Init()
 	ctx := context.Background()
 	bot := initBot(true)
 	client, err := datastore.NewClient(ctx, Conf.Project)
