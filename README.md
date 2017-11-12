@@ -5,4 +5,5 @@ Servitor is a telegram bot helping you to schedule (not yet :grinning:) posts in
 ## TODO
 
 * refactoring
-* retrieve and store access tokens from Google
+* ~~retrieve and store access tokens from Google~~
+* integrate with google Calendar API
